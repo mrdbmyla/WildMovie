@@ -1,5 +1,5 @@
 # =============================================================
-# streamlit run "WCS/github/wildmovies-app-dev/streamlit-ui-dev.py"
+# streamlit run "WCS/github/wildmovie-app-dev/app.py"
 # =============================================================
 
 # =============================================================
@@ -7,7 +7,6 @@
 # =============================================================
 
 import streamlit as st
-import pandas as pd
 import requests
 import base64
 import random
@@ -23,21 +22,32 @@ images_folder = current_script_folder / "img"
 model_files_folder = current_script_folder / "files"
 
 # =============================================================
+# réglages
+# =============================================================
+
+st.set_page_config(
+    page_title="Wild Movies",
+    page_icon="🎬",
+    layout="centered",
+    initial_sidebar_state="collapsed"
+)
+
+# =============================================================
 # charger le modèle & data
 # =============================================================
 
 # @st.cache_resource garde tout dans le cache
 @st.cache_resource
-def load_model_artifacts():
-    movies_dataframe = pd.read_parquet(model_files_folder / "df_concat.parquet")
-    features_csv = pd.read_csv(model_files_folder / "feature_columns.csv")
-    feature_column_names = features_csv["feature"].tolist()
-    data_scaler = joblib.load(model_files_folder / "scaler.joblib")
-    nearest_neighbors_model = joblib.load(model_files_folder / "nn_model.joblib")
+def load_light_model():
+    artifacts = joblib.load(model_files_folder / "nn_model_light.joblib")
+    nn_model = artifacts["model"]
+    id_by_index = artifacts["id_by_index"]
+    title_by_index = artifacts["title_by_index"]
+    title_to_id = {title.lower(): mid for title, mid in zip(title_by_index, id_by_index)}
     
-    return movies_dataframe, feature_column_names, data_scaler, nearest_neighbors_model
+    return nn_model, id_by_index, title_by_index, title_to_id
 
-df_concat, feature_columns, scaler, nn_model = load_model_artifacts()
+nn_model, id_by_index, title_by_index, title_to_id = load_light_model()
 
 # =============================================================
 # img --> base64 (img de fond & logo)
@@ -79,62 +89,36 @@ def set_background_image(image_file_path, opacity=0.3):
 # =============================================================
 
 # fonction de recherche dans le modèle
-def find_movie_id_by_title(search_title, movies_dataframe):
-    matches = movies_dataframe[movies_dataframe["Titre"].str.lower() == search_title.strip().lower()]
+def find_movie_id_by_title(search_title):
+    imdb_id = title_to_id.get(search_title.strip().lower())
     
-    if len(matches) == 0:
+    if imdb_id is None:
         st.error("Film non trouvé dans la base de données.")
-        return None
     
-    return matches.iloc[0]["ID_film"]
+    return imdb_id
 
 # API: fonction de récupération de posters & infos d'imdbapi.dev
 # --> à changer pour TMDb pour avoir les versions localisées
 def fetch_movie_details_from_api(imdb_id):
-     # API URL
     api_url = f"https://api.imdbapi.dev/titles/{imdb_id}"
     
     try:
         api_response = requests.get(api_url)
-
-        if api_response.status_code != 200:
-            st.error(f"""
-                Erreur API (status {api_response.status_code}):
-                URL: {api_url}
-                Response: {api_response.text}
-            """)
-            return None
-
         response_data = api_response.json()
         
-        # ce que nous voulons
-        movie_title = response_data.get("primaryTitle", "Unknown Title")
-        movie_plot = response_data.get("plot", "No plot available.")
-        primary_image_data = response_data.get("primaryImage", {})
-        poster_url = primary_image_data.get("url")
-        movie_genres = response_data.get("genres", [])
-        rating_data = response_data.get("rating", {})
-        movie_rating = rating_data.get("aggregateRating")
-        
-        # dictionnaire avec le tout
         movie_details = {
             "id": imdb_id,
-            "title": movie_title,
-            "plot": movie_plot,
-            "poster": poster_url,
-            "genres": movie_genres,
-            "rating": movie_rating
+            "title": response_data.get("primaryTitle", "Unknown Title"),
+            "plot": response_data.get("plot", "No plot available."),
+            "poster": response_data.get("primaryImage", {}).get("url"),
+            "genres": response_data.get("genres", []),
+            "rating": response_data.get("rating", {}).get("aggregateRating")
         }
         
         return movie_details
         
-    except Exception as error:
-        st.error(f"""
-            Erreur lors de la récupération des données:
-            URL: {api_url}
-            Type d'erreur: {type(error).__name__}
-            Message: {error}
-        """)
+    except:
+        st.error(f"Erreur lors de la récupération: {api_url}")
         return None
 
 
@@ -143,32 +127,34 @@ def fetch_movie_details_from_api(imdb_id):
 # =============================================================
 
 # fonction pour recommendations
-def get_movie_recommendations(imdb_id, number_of_recommendations):
-    # trouver le film
-    movie_row_index = df_concat.index[df_concat["ID_film"] == imdb_id][0]
+def get_movie_recommendations(imdb_id, number_of_recommendations=3):
+    # trouver la position du film dans la liste
+    film_index = id_by_index.index(imdb_id)
     
-    # extraire et scaler les features
-    movie_features = df_concat.loc[[movie_row_index], feature_columns]
-    scaled_features = scaler.transform(movie_features)
+    film_features = nn_model._fit_X[film_index]
     
-    # trouver les voisins
-    distances, indices = nn_model.kneighbors(scaled_features, n_neighbors=number_of_recommendations + 1)
+    # trouver les voisins les plus proches (+1 car le film lui-même est inclus)
+    distances, indices = nn_model.kneighbors(film_features, n_neighbors=number_of_recommendations + 1)
     
-    # convertir indices en IDs imdb
-    neighbor_ids = df_concat.iloc[indices[0]]["ID_film"].tolist()
+    # enlever le film original de la liste
+    neighbor_indices = []
+    for i in indices[0]:
+        if i != film_index:
+            neighbor_indices.append(i)
+
+    # limiter au nombre demandé
+    neighbor_indices = neighbor_indices[:number_of_recommendations]
     
-    # enlever le film original et retourner
-    neighbor_ids.remove(imdb_id)
+    # convertir les recos en IDs imdb
+    neighbor_ids = []
+    for i in neighbor_indices:
+        neighbor_ids.append(id_by_index[i])
+    
     return neighbor_ids
 
-# fonction pour films aléatoires à l'ouverture de page
-# critère: l'année
-def pick_random_recent_movies(number_of_movies=3, minimum_year=2018):
-    year_values = pd.to_numeric(df_concat["Année"], errors="coerce")
-    recent_movies = df_concat[year_values >= minimum_year]
-    unique_ids = recent_movies["ID_film"].dropna().drop_duplicates().tolist()
-    
-    return random.sample(unique_ids, k=number_of_movies)
+# fonction pour 3 films aléatoires à l'ouverture de page
+def pick_random_recent_movies(number_of_movies=3):
+    return random.sample(id_by_index, k=number_of_movies)
 
 
 # =============================================================
@@ -226,7 +212,21 @@ custom_css = """
         --button-accent-color-2: #7248B2;
         --white: #EAEAEA;
     }
-    
+
+    /* logo */
+    .fixed-logo {
+    position: fixed;
+    top: 100px;
+    left: 60px;
+    z-index: 9999;
+    width: 120px;
+    }
+
+    .fixed-logo img { 
+    width: 100%; 
+    height: auto; 
+    }
+
     /* Style for horizontal lines */
     hr {
         margin-top: 20px !important;
@@ -298,6 +298,10 @@ custom_css = """
         white-space: pre-wrap !important;
         word-wrap: break-word !important;
     }
+
+    [data-testid="stSidebarNav"] {
+        display: none !important;
+    }
     
     /* Sidebar logo spacing */
     .sidebar-logo {
@@ -313,19 +317,6 @@ st.markdown(custom_css, unsafe_allow_html=True)
 # =============================================================
 
 logo_html = f"""
-<style>
-.fixed-logo {{
-    position: fixed;
-    top: 100px;
-    left: 60px;
-    z-index: 9999;
-    width: 120px;
-}}
-.fixed-logo img {{ 
-    width: 100%; 
-    height: auto; 
-}}
-</style>
 <div class="fixed-logo">
     <img src="data:image/svg+xml;base64,{logo_base64}" alt="Logo">
 </div>
@@ -365,49 +356,27 @@ st.markdown("---")
 user_performed_search = search_button_clicked and user_search_input
 
 if user_performed_search:
-    
-    found_imdb_id = find_movie_id_by_title(user_search_input, df_concat)
-    if found_imdb_id is None:
-        st.stop()
-    
-    searched_movie_data = fetch_movie_details_from_api(found_imdb_id)
-    if searched_movie_data is None:
-        st.stop()
-    
-    # film recherché
-    display_searched_movie(searched_movie_data)
-    st.markdown("---")
-    
-    st.markdown(
-        f'<h3 class="title-reco">Similaires à {searched_movie_data["title"]}:</h3>',
-        unsafe_allow_html=True
-    )
-    
-    recommended_movie_ids = get_movie_recommendations(
-        imdb_id=found_imdb_id,
-        number_of_recommendations=3
-    )
-    
-    recommendation_columns = st.columns(3, gap="medium")
-    
-    for i in range(len(recommended_movie_ids)):
-        with recommendation_columns[i]:
-            recommendation_data = fetch_movie_details_from_api(recommended_movie_ids[i])
-            display_movie_card(recommendation_data, show_full_card=True)
-
+    imdb_id = find_movie_id_by_title(user_search_input)
+    if imdb_id:
+        movie_data = fetch_movie_details_from_api(imdb_id)
+        if movie_data:
+            display_searched_movie(movie_data)
+            st.markdown("---")
+            st.markdown(f'<h3 class="title-reco">Similaires à {movie_data["title"]}:</h3>', unsafe_allow_html=True)
+            reco_ids = get_movie_recommendations(imdb_id, number_of_recommendations=3)
+            cols = st.columns(3, gap="medium")
+            for i, rid in enumerate(reco_ids):
+                with cols[i]:
+                    reco_data = fetch_movie_details_from_api(rid)
+                    display_movie_card(reco_data, show_full_card=True)
 else:
-    # pas de recherche, affiche "Actuellement en salles"
-    promo_movie_ids = pick_random_recent_movies()
-    st.markdown(
-        '<h3 class="title-reco">Actuellement à l\'affiche:</h3>', 
-        unsafe_allow_html=True
-    )
-    promo_columns = st.columns(3, gap="medium")
-    
-    for i in range(len(promo_movie_ids)):
-        with promo_columns[i]:
-            promo_movie_data = fetch_movie_details_from_api(promo_movie_ids[i])
-            display_movie_card(promo_movie_data)
+    st.markdown('<h3 class="title-reco">Actuellement à l\'affiche:</h3>', unsafe_allow_html=True)
+    promo_ids = pick_random_recent_movies()
+    cols = st.columns(3, gap="medium")
+    for i, pid in enumerate(promo_ids):
+        with cols[i]:
+            promo_data = fetch_movie_details_from_api(pid)
+            display_movie_card(promo_data)
 
 
 # =============================================================
