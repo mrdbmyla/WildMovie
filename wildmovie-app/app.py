@@ -33,6 +33,13 @@ st.set_page_config(
 )
 
 # =============================================================
+# les poids pour favoriser les 'features'
+# =============================================================
+
+ACTOR_WEIGHT = 2.5 # 1.0 = neutre / 2.5 = biais acteurs
+GENRE_WEIGHT = 1.0 # pas besoin de modifier, 1.0 = neutre
+
+# =============================================================
 # charger le modèle & data
 # =============================================================
 
@@ -44,10 +51,12 @@ def load_light_model():
     id_by_index = artifacts["id_by_index"]
     title_by_index = artifacts["title_by_index"]
     title_to_id = {title.lower(): mid for title, mid in zip(title_by_index, id_by_index)}
+    actor_cols = artifacts["actor_cols"]
+    genre_cols = artifacts["genre_cols"]
     
-    return nn_model, id_by_index, title_by_index, title_to_id
+    return nn_model, id_by_index, title_by_index, title_to_id, actor_cols, genre_cols
 
-nn_model, id_by_index, title_by_index, title_to_id = load_light_model()
+nn_model, id_by_index, title_by_index, title_to_id, actor_cols, genre_cols = load_light_model()
 
 # =============================================================
 # img --> base64 (img de fond & logo)
@@ -125,31 +134,28 @@ def fetch_movie_details_from_api(imdb_id):
 # =============================================================
 # requêtes: recommendations
 # =============================================================
+from scipy.sparse import csr_matrix
 
 # fonction pour recommendations
-def get_movie_recommendations(imdb_id, number_of_recommendations=3):
-    # trouver la position du film dans la liste
+def get_movie_recommendations(imdb_id, number_of_recommendations=3, actor_cols=None, genre_cols=None):
     film_index = id_by_index.index(imdb_id)
-    
-    film_features = nn_model._fit_X[film_index]
-    
-    # trouver les voisins les plus proches (+1 car le film lui-même est inclus)
-    distances, indices = nn_model.kneighbors(film_features, n_neighbors=number_of_recommendations + 1)
-    
-    # enlever le film original de la liste
-    neighbor_indices = []
-    for i in indices[0]:
-        if i != film_index:
-            neighbor_indices.append(i)
 
-    # limiter au nombre demandé
-    neighbor_indices = neighbor_indices[:number_of_recommendations]
-    
-    # convertir les recos en IDs imdb
-    neighbor_ids = []
-    for i in neighbor_indices:
-        neighbor_ids.append(id_by_index[i])
-    
+    # copier le modèle pour version poids
+    film_features = nn_model._fit_X[film_index].copy()
+
+    # utiliser des poids
+    film_features[:, actor_cols] *= ACTOR_WEIGHT
+    film_features[:, genre_cols] *= GENRE_WEIGHT
+
+    # 3) trouver les voisins les plus proches (+1 car le film lui-même est inclus)
+    distances, indices = nn_model.kneighbors(
+        film_features,
+        n_neighbors=number_of_recommendations + 1
+    )
+
+    neighbor_ids = [id_by_index[i] for i in indices[0]]
+    neighbor_ids.remove(imdb_id)
+
     return neighbor_ids
 
 # fonction pour 3 films aléatoires à l'ouverture de page
@@ -363,7 +369,7 @@ if user_performed_search:
             display_searched_movie(movie_data)
             st.markdown("---")
             st.markdown(f'<h3 class="title-reco">Similaires à {movie_data["title"]}:</h3>', unsafe_allow_html=True)
-            reco_ids = get_movie_recommendations(imdb_id, number_of_recommendations=3)
+            reco_ids = get_movie_recommendations(imdb_id, number_of_recommendations=3, actor_cols=actor_cols, genre_cols=genre_cols)
             cols = st.columns(3, gap="medium")
             for i, rid in enumerate(reco_ids):
                 with cols[i]:
