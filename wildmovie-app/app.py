@@ -412,11 +412,12 @@ st.sidebar.code(team_info)
 
 # tech utilisée
 tech_stack = """
-# Tech utilisées:
+# Techs utilisées:
                 
 Python
 Pandas
 Machine Learning
 Streamlit
-DataViz"""
+DataViz
+GitHub"""
 st.sidebar.code(tech_stack)
