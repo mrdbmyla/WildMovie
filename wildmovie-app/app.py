@@ -1,5 +1,5 @@
 # =============================================================
-# streamlit run "WCS/github/wildmovie-app-dev/app.py"
+# streamlit run "WCS/github/wildmovie-app-dev/streamlit-ui-dev.py"
 # =============================================================
 
 # =============================================================
@@ -94,6 +94,14 @@ def set_background_image(image_file_path, opacity=0.3):
     st.markdown(css_code, unsafe_allow_html=True)
 
 # =============================================================
+# TMDb token
+# =============================================================
+
+# La clé est une clé perso, si jamais elle arrête de fonctionner
+# un jour, faut la remplacer par une autre
+TMDB_API_TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJkMjBhNDdhN2U4ZGE2YmY3ZWVjN2Q5NGMyMDkzOTgxMSIsIm5iZiI6MTc2NTc5NTA3OC4zNjgsInN1YiI6IjY5M2ZlNTA2OThlZTMyZTFiNDVlMDRlOCIsInNjb3BlcyI6WyJhcGlfcmVhZCJdLCJ2ZXJzaW9uIjoxfQ.iwKRe6e1eMg8l0vMzLaUXZpW5bINaX_wpWfHqOm3aBQ"
+
+# =============================================================
 # requêtes: recherche
 # =============================================================
 
@@ -106,29 +114,35 @@ def find_movie_id_by_title(search_title):
     
     return imdb_id
 
-# API: fonction de récupération de posters & infos d'imdbapi.dev
-# --> à changer pour TMDb pour avoir les versions localisées
-def fetch_movie_details_from_api(imdb_id):
-    api_url = f"https://api.imdbapi.dev/titles/{imdb_id}"
+def fetch_movie_details_from_api(imdb_id, truncate_plot=False):
+    """Récupère les infos d'un film depuis TMDB en français"""
     
-    try:
-        api_response = requests.get(api_url)
-        response_data = api_response.json()
-        
-        movie_details = {
-            "id": imdb_id,
-            "title": response_data.get("primaryTitle", "Unknown Title"),
-            "plot": response_data.get("plot", "No plot available."),
-            "poster": response_data.get("primaryImage", {}).get("url"),
-            "genres": response_data.get("genres", []),
-            "rating": response_data.get("rating", {}).get("aggregateRating")
-        }
-        
-        return movie_details
-        
-    except:
-        st.error(f"Erreur lors de la récupération: {api_url}")
-        return None
+    headers = {"Authorization": f"Bearer {TMDB_API_TOKEN}"}
+    
+    # Trouver le TMDB ID
+    find_url = f"https://api.themoviedb.org/3/find/{imdb_id}?external_source=imdb_id&language=fr-FR"
+    tmdb_id = requests.get(find_url, headers=headers).json()["movie_results"][0]["id"]
+    
+    # Récupérer les détails
+    details_url = f"https://api.themoviedb.org/3/movie/{tmdb_id}?language=fr-FR"
+    movie = requests.get(details_url, headers=headers).json()
+    
+    # Limiter le synopsis
+    # Gérer la longueur du synopsis
+    plot = movie["overview"]
+    if truncate_plot and len(plot) > 280:
+        plot = plot[:280] + "..."
+
+    # Retourner les infos importantes
+    return {
+        "id": imdb_id,
+        "tmdb_id": tmdb_id,
+        "title": movie["title"],
+        "plot": plot,
+        "poster": f"https://image.tmdb.org/t/p/w500{movie['poster_path']}" if movie["poster_path"] else None,
+        "genres": [g["name"] for g in movie["genres"]],
+        "rating": movie["vote_average"]
+    }
 
 
 # =============================================================
@@ -190,13 +204,15 @@ def display_movie_card(movie_data, show_full_card=False):
         return
     st.image(movie_data["poster"], width=200)
     st.markdown(f"#### {movie_data['title']}")
+    st.write(movie_data["plot"])
+    genres_text = ", ".join(movie_data["genres"])
+    st.write(f"**Genres:** {genres_text}")
+    rating_html = f'<span class="rating-badge">⭐ {movie_data["rating"]:.1f}</span>'
+    st.markdown(rating_html, unsafe_allow_html=True)
     # afficher version entendue pour recommendations
+    # Note: il n'y a pas de différence actuellement
     if show_full_card:
-        st.write(movie_data["plot"])
-        genres_text = ", ".join(movie_data["genres"])
-        st.write(f"**Genres:** {genres_text}")
-        rating_html = f'<span class="rating-badge">⭐ {movie_data["rating"]}</span>'
-        st.markdown(rating_html, unsafe_allow_html=True)
+        st.write(f" ")
 
 
 # =============================================================
@@ -364,7 +380,7 @@ user_performed_search = search_button_clicked and user_search_input
 if user_performed_search:
     imdb_id = find_movie_id_by_title(user_search_input)
     if imdb_id:
-        movie_data = fetch_movie_details_from_api(imdb_id)
+        movie_data = fetch_movie_details_from_api(imdb_id, truncate_plot=True)
         if movie_data:
             display_searched_movie(movie_data)
             st.markdown("---")
@@ -373,7 +389,7 @@ if user_performed_search:
             cols = st.columns(3, gap="medium")
             for i, rid in enumerate(reco_ids):
                 with cols[i]:
-                    reco_data = fetch_movie_details_from_api(rid)
+                    reco_data = fetch_movie_details_from_api(rid, truncate_plot=False)
                     display_movie_card(reco_data, show_full_card=True)
 else:
     st.markdown('<h3 class="title-reco">Actuellement à l\'affiche:</h3>', unsafe_allow_html=True)
@@ -381,7 +397,7 @@ else:
     cols = st.columns(3, gap="medium")
     for i, pid in enumerate(promo_ids):
         with cols[i]:
-            promo_data = fetch_movie_details_from_api(pid)
+            promo_data = fetch_movie_details_from_api(pid, truncate_plot=False)
             display_movie_card(promo_data)
 
 
